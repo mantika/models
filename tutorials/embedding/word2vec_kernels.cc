@@ -72,10 +72,10 @@ class SkipgramWord2vecOp : public OpKernel {
     Tensor words_per_epoch(DT_INT64, TensorShape({}));
     Tensor current_epoch(DT_INT32, TensorShape({}));
     Tensor total_words_processed(DT_INT64, TensorShape({}));
-    Tensor examples(DT_INT32, TensorShape({batch_size_}));
-    auto Texamples = examples.flat<int32>();
-    Tensor labels(DT_INT32, TensorShape({batch_size_}));
-    auto Tlabels = labels.flat<int32>();
+    Tensor examples(DT_INT64, TensorShape({batch_size_}));
+    auto Texamples = examples.flat<int64>();
+    Tensor labels(DT_INT64, TensorShape({batch_size_}));
+    auto Tlabels = labels.flat<int64>();
     {
       mutex_lock l(mu_);
       for (int i = 0; i < batch_size_; ++i) {
@@ -105,22 +105,22 @@ class SkipgramWord2vecOp : public OpKernel {
 
  private:
   struct Example {
-    int32 input;
-    int32 label;
+    int64 input;
+    int64 label;
   };
 
   int32 batch_size_ = 0;
   int32 window_size_ = 5;
   float subsample_ = 1e-3;
   int min_count_ = 5;
-  int32 vocab_size_ = 0;
+  int64 vocab_size_ = 0;
   Tensor word_;
   Tensor freq_;
   int64 corpus_size_ = 0;
-  std::vector<int32> corpus_;
+  std::vector<int64> corpus_;
   std::vector<Example> precalc_examples_;
   int precalc_index_ = 0;
-  std::vector<int32> sentence_;
+  std::vector<int64> sentence_;
   int sentence_index_ = 0;
 
   mutex mu_;
@@ -128,15 +128,15 @@ class SkipgramWord2vecOp : public OpKernel {
   random::SimplePhilox rng_ GUARDED_BY(mu_);
   int32 current_epoch_ GUARDED_BY(mu_) = -1;
   int64 total_words_processed_ GUARDED_BY(mu_) = 0;
-  int32 example_pos_ GUARDED_BY(mu_);
-  int32 label_pos_ GUARDED_BY(mu_);
-  int32 label_limit_ GUARDED_BY(mu_);
+  int64 example_pos_ GUARDED_BY(mu_);
+  int64 label_pos_ GUARDED_BY(mu_);
+  int64 label_limit_ GUARDED_BY(mu_);
 
   // {example_pos_, label_pos_} is the cursor for the next example.
   // example_pos_ wraps around at the end of corpus_. For each
   // example, we randomly generate [label_pos_, label_limit) for
   // labels.
-  void NextExample(int32* example, int32* label) EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+  void NextExample(int64* example, int64* label) EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     while (true) {
       if (label_pos_ >= label_limit_) {
         ++total_words_processed_;
@@ -149,7 +149,7 @@ class SkipgramWord2vecOp : public OpKernel {
               example_pos_ = 0;
             }
             if (subsample_ > 0) {
-              int32 word_freq = freq_.flat<int32>()(corpus_[example_pos_]);
+              int64 word_freq = freq_.flat<int64>()(corpus_[example_pos_]);
               // See Eq. 5 in http://arxiv.org/abs/1310.4546
               float keep_prob =
                   (std::sqrt(word_freq / (subsample_ * corpus_size_)) + 1) *
@@ -162,10 +162,10 @@ class SkipgramWord2vecOp : public OpKernel {
             sentence_[i] = corpus_[example_pos_];
           }
         }
-        const int32 skip = 1 + rng_.Uniform(window_size_);
-        label_pos_ = std::max<int32>(0, sentence_index_ - skip);
+        const int64 skip = 1 + rng_.Uniform(window_size_);
+        label_pos_ = std::max<int64>(0, sentence_index_ - skip);
         label_limit_ =
-            std::min<int32>(kSentenceSize, sentence_index_ + skip + 1);
+            std::min<int64>(kSentenceSize, sentence_index_ + skip + 1);
       }
       if (sentence_index_ != label_pos_) {
         break;
@@ -182,7 +182,7 @@ class SkipgramWord2vecOp : public OpKernel {
     StringPiece input = data;
     string w;
     corpus_size_ = 0;
-    std::unordered_map<string, int32> word_freq;
+    std::unordered_map<string, int64> word_freq;
     while (ScanWord(&input, &w)) {
       ++(word_freq[w]);
       ++corpus_size_;
@@ -192,7 +192,7 @@ class SkipgramWord2vecOp : public OpKernel {
                                      " contains too little data: ",
                                      corpus_size_, " words");
     }
-    typedef std::pair<string, int32> WordFreq;
+    typedef std::pair<string, int64> WordFreq;
     std::vector<WordFreq> ordered;
     for (const auto& p : word_freq) {
       if (p.second >= min_count_) ordered.push_back(p);
@@ -206,32 +206,39 @@ class SkipgramWord2vecOp : public OpKernel {
               [](const WordFreq& x, const WordFreq& y) {
                 return x.second > y.second;
               });
-    vocab_size_ = static_cast<int32>(1 + ordered.size());
+    vocab_size_ = static_cast<int64>(1 + ordered.size());
     Tensor word(DT_STRING, TensorShape({vocab_size_}));
-    Tensor freq(DT_INT32, TensorShape({vocab_size_}));
+    Tensor freq(DT_INT64, TensorShape({vocab_size_}));
     word.flat<string>()(0) = "UNK";
-    static const int32 kUnkId = 0;
-    std::unordered_map<string, int32> word_id;
+    static const int64 kUnkId = 0;
+    std::unordered_map<string, int64> word_id;
     int64 total_counted = 0;
     for (std::size_t i = 0; i < ordered.size(); ++i) {
       const auto& w = ordered[i].first;
       auto id = i + 1;
       word.flat<string>()(id) = w;
       auto word_count = ordered[i].second;
-      freq.flat<int32>()(id) = word_count;
+      freq.flat<int64>()(id) = word_count;
       total_counted += word_count;
       word_id[w] = id;
     }
-    freq.flat<int32>()(kUnkId) = corpus_size_ - total_counted;
+    freq.flat<int64>()(kUnkId) = corpus_size_ - total_counted;
     word_ = word;
     freq_ = freq;
     corpus_.reserve(corpus_size_);
     input = data;
+    // unsigned long word_count = 0;
     while (ScanWord(&input, &w)) {
       corpus_.push_back(gtl::FindWithDefault(word_id, w, kUnkId));
+      // if (++word_count % 100000 == 0) {
+      //     LOG(INFO) << "Processed " << word_count << " words so far...\r";
+      // }
     }
     precalc_examples_.resize(kPrecalc);
     sentence_.resize(kSentenceSize);
+    // LOG(INFO) << "Data file: " << filename << ". Processed " << word_count
+    //           << " words, contains " << ordered.size()
+    //           << " unique frequent words.";
     return Status::OK();
   }
 };
@@ -245,7 +252,7 @@ class NegTrainWord2vecOp : public OpKernel {
 
     OP_REQUIRES_OK(ctx, ctx->GetAttr("num_negative_samples", &num_samples_));
 
-    std::vector<int32> vocab_count;
+    std::vector<int64> vocab_count;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("vocab_count", &vocab_count));
 
     std::vector<float> vocab_weights;
@@ -278,8 +285,8 @@ class NegTrainWord2vecOp : public OpKernel {
 
     auto Tw_in = w_in.matrix<float>();
     auto Tw_out = w_out.matrix<float>();
-    auto Texamples = examples.flat<int32>();
-    auto Tlabels = labels.flat<int32>();
+    auto Texamples = examples.flat<int64>();
+    auto Tlabels = labels.flat<int64>();
     auto lr = learning_rate.scalar<float>()();
     const int64 vocab_size = w_in.dim_size(0);
     const int64 dims = w_in.dim_size(1);
@@ -303,9 +310,9 @@ class NegTrainWord2vecOp : public OpKernel {
     random::SimplePhilox srnd(&rnd);
 
     for (int64 i = 0; i < batch_size; ++i) {
-      const int32 example = Texamples(i);
+      const int64 example = Texamples(i);
       DCHECK(0 <= example && example < vocab_size) << example;
-      const int32 label = Tlabels(i);
+      const int64 label = Tlabels(i);
       DCHECK(0 <= label && label < vocab_size) << label;
       auto v_in = Tw_in.chip<0>(example);
 
@@ -345,7 +352,7 @@ class NegTrainWord2vecOp : public OpKernel {
   }
 
  private:
-  int32 num_samples_ = 0;
+  int64 num_samples_ = 0;
   random::DistributionSampler* sampler_ = nullptr;
   GuardedPhiloxRandom base_;
 };
